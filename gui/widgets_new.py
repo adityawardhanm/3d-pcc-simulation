@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QPushButton, QGroupBox, QGridLayout, QTabWidget,
     QTextEdit, QSpinBox, QDoubleSpinBox, QSplitter, QLineEdit, QSizePolicy,
-    QScrollArea
+    QScrollArea, QCheckBox
     )
 from PySide6.QtCore import (
     Qt, QThread, Signal
@@ -41,20 +41,76 @@ import ctypes
 # Other imports
 import math
 
+import time
+import numpy as np  # Already imported, but ensure it's there
+
+# PINO Data Collection imports
+try:
+    pino_path = root / "pino" 
+    sys.path.insert(0, str(pino_path.parent))
+    from pino.training.data_collector import PINODataCollector
+    PINO_AVAILABLE = True
+    print("✓ PINO module loaded successfully")
+except ImportError as e:
+    print(f"⚠ PINO module not available: {e}")
+    PINO_AVAILABLE = False
+
 # LOAD CUDA SHARED LIBRARY
-lib = ctypes.CDLL(str(root / "lib/forward_kinematics.so"))
+lib = ctypes.CDLL(str(root / "lib/fk.so"))
 lib.generate_spline_points.argtypes = [
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # kappa
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # theta
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # phi
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # length
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # T_cumulative
-    ctypes.c_int,                                     # resolution
-    ctypes.c_int,                                     # num_segments
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")   # output
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ctypes.c_int,
+    ctypes.c_int,
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")
 ]
 lib.generate_spline_points.restype = ctypes.c_int
 
+lib.initialize_gpu_context.argtypes = [
+    ctypes.c_int,                                      # num_segments
+    ctypes.c_int,                                      # resolution
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # length
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")    # T_cumulative
+]
+lib.initialize_gpu_context.restype = ctypes.c_int
+
+lib.update_spline_fast.argtypes = [
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # kappa
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # theta
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # phi
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")    # output
+]
+lib.update_spline_fast.restype = ctypes.c_int
+
+lib.update_transforms.argtypes = [
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")    # T_cumulative
+]
+lib.update_transforms.restype = ctypes.c_int
+lib.check_gpu_status.argtypes = []
+lib.check_gpu_status.restype = ctypes.c_int
+lib.destroy_gpu_context.argtypes = []
+lib.destroy_gpu_context.restype = ctypes.c_int
+lib.reset_gpu_context.argtypes = []
+lib.reset_gpu_context.restype = ctypes.c_int
+
+# ADD THIS TEST CODE:
+print("\n" + "="*60)
+print("TESTING GPU CONTEXT FUNCTIONS")
+print("="*60)
+
+try:
+    # Test if functions exist
+    print("✓ initialize_gpu_context found:", hasattr(lib, 'initialize_gpu_context'))
+    print("✓ update_spline_fast found:", hasattr(lib, 'update_spline_fast'))
+    print("✓ update_transforms found:", hasattr(lib, 'update_transforms'))
+    print("✓ destroy_gpu_context found:", hasattr(lib, 'destroy_gpu_context'))
+except Exception as e:
+    print(f"✗ Error checking functions: {e}")
+
+print("="*60 + "\n")
 
 class SimulationWorker(QThread):
     """Background thread for running simulation"""
@@ -92,7 +148,450 @@ class SimulationWorker(QThread):
             error_msg = f"!! Unexpected Error:\n{str(e)}\n\n{traceback.format_exc()}"
             self.error.emit(error_msg)
 
-class RobotGUI(QMainWindow):
+class PINODataCollectionMixin:
+    """
+    Mixin class containing PINO data collection methods.
+    Copy these methods into your RobotGUI class.
+    """
+    
+    def create_data_collection_controls(self):
+        """Create data collection controls for PINO training"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Status group
+        status_group = QGroupBox("Collection Status")
+        status_layout = QVBoxLayout(status_group)
+        
+        self.collection_status_label = QLabel("Status: Not Collecting")
+        self.collection_status_label.setStyleSheet("font-weight: bold;")
+        status_layout.addWidget(self.collection_status_label)
+        
+        self.samples_collected_label = QLabel("Samples: 0")
+        status_layout.addWidget(self.samples_collected_label)
+        
+        self.current_config_label = QLabel("Config: None")
+        status_layout.addWidget(self.current_config_label)
+        
+        layout.addWidget(status_group)
+        
+        # Control buttons
+        button_group = QGroupBox("Controls")
+        button_layout = QVBoxLayout(button_group)
+        
+        self.start_collection_btn = QPushButton("▶ Start Collection")
+        self.start_collection_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                padding: 10px;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #218838; }
+            QPushButton:disabled { background-color: #94d3a2; }
+        """)
+        self.start_collection_btn.clicked.connect(self.start_data_collection)
+        button_layout.addWidget(self.start_collection_btn)
+        
+        self.stop_collection_btn = QPushButton("⏹ Stop & Save")
+        self.stop_collection_btn.setEnabled(False)
+        self.stop_collection_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                padding: 10px;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #c82333; }
+            QPushButton:disabled { background-color: #f5c6cb; }
+        """)
+        self.stop_collection_btn.clicked.connect(self.stop_data_collection)
+        button_layout.addWidget(self.stop_collection_btn)
+        
+        layout.addWidget(button_group)
+        
+        # Collection settings
+        settings_group = QGroupBox("Collection Settings")
+        settings_layout = QGridLayout(settings_group)
+        
+        settings_layout.addWidget(QLabel("Save format:"), 0, 0)
+        from PySide6.QtWidgets import QComboBox
+        self.save_format_combo = QComboBox()
+        self.save_format_combo.addItems(["hdf5", "npz", "json"])
+        settings_layout.addWidget(self.save_format_combo, 0, 1)
+        
+        settings_layout.addWidget(QLabel("Auto-save every:"), 1, 0)
+        self.auto_save_spin = QSpinBox()
+        self.auto_save_spin.setRange(100, 10000)
+        self.auto_save_spin.setValue(500)
+        self.auto_save_spin.setSuffix(" samples")
+        settings_layout.addWidget(self.auto_save_spin, 1, 1)
+        
+        layout.addWidget(settings_group)
+        
+        # Tips
+        tips_group = QGroupBox("Tips")
+        tips_layout = QVBoxLayout(tips_group)
+        tips_text = QLabel(
+            "1. Set robot configuration first\n"
+            "2. Click 'Start Collection'\n"
+            "3. Run simulations with varied pressures\n"
+            "4. Click 'Stop & Save' when done\n"
+            "5. Train with: python -m pino.training.train_pino"
+        )
+        tips_text.setWordWrap(True)
+        tips_layout.addWidget(tips_text)
+        layout.addWidget(tips_group)
+        
+        # Warning if PINO not available
+        if not PINO_AVAILABLE:
+            warning_label = QLabel(
+                "⚠ PINO module not found!\n"
+                "Create pino/ directory with __init__.py files.\n"
+                "See pino_integration_guide.md for setup."
+            )
+            warning_label.setStyleSheet("color: red; font-weight: bold;")
+            layout.addWidget(warning_label)
+            self.start_collection_btn.setEnabled(False)
+        
+        layout.addStretch()
+        return widget
+    
+    def start_data_collection(self):
+        """Start collecting training data"""
+        if self.data_collector is None:
+            self.output_text.append("✗ Data collector not initialized!")
+            return
+        
+        # Build configuration from current GUI settings
+        config = self._build_pino_config()
+        self.data_collector.set_configuration(config)
+        
+        # Update auto-save interval
+        self.data_collector.auto_save_interval = self.auto_save_spin.value()
+        
+        self.is_collecting_data = True
+        self.collection_config = config
+        
+        # Update UI
+        self.collection_status_label.setText("Status: ✓ COLLECTING")
+        self.collection_status_label.setStyleSheet(
+            "color: green; font-weight: bold; font-size: 14px;"
+        )
+        self.current_config_label.setText(
+            f"Config: {config['num_segments']} seg, {config['material_model']}"
+        )
+        self.start_collection_btn.setEnabled(False)
+        self.stop_collection_btn.setEnabled(True)
+        
+        self.output_text.append("\n" + "="*50)
+        self.output_text.append("✓ PINO DATA COLLECTION STARTED")
+        self.output_text.append("="*50)
+        self.output_text.append(f"  Segments: {config['num_segments']}")
+        self.output_text.append(f"  Material: {config['material_model']}")
+        self.output_text.append(f"  Save format: {self.save_format_combo.currentText()}")
+        self.output_text.append(f"  Auto-save every: {self.auto_save_spin.value()} samples")
+        self.output_text.append("  → Run simulations with different pressures to collect data")
+        self.output_text.append("="*50 + "\n")
+    
+    def stop_data_collection(self):
+        """Stop collecting and save data"""
+        if self.data_collector is None:
+            return
+        
+        self.is_collecting_data = False
+        
+        # Get format
+        save_format = self.save_format_combo.currentText()
+        
+        # Save collected data
+        self.data_collector.save(format=save_format)
+        stats = self.data_collector.get_statistics()
+        
+        # Update UI
+        self.collection_status_label.setText("Status: Stopped (Saved)")
+        self.collection_status_label.setStyleSheet(
+            "color: black; font-weight: bold;"
+        )
+        self.start_collection_btn.setEnabled(True)
+        self.stop_collection_btn.setEnabled(False)
+        
+        self.output_text.append("\n" + "="*50)
+        self.output_text.append("✓ DATA COLLECTION STOPPED & SAVED")
+        self.output_text.append("="*50)
+        self.output_text.append(f"  Total samples: {stats['total_samples']}")
+        self.output_text.append(f"  Session ID: {stats['session_id']}")
+        self.output_text.append(f"  Format: {save_format}")
+        self.output_text.append(f"  Location: data/raw/")
+        self.output_text.append("")
+        self.output_text.append("  To train the model, run:")
+        self.output_text.append("  python -m pino.training.train_pino --data data/raw/pino_data_*.h5")
+        self.output_text.append("="*50 + "\n")
+    
+    def _build_pino_config(self) -> dict:
+        """Build PINO configuration from current GUI state"""
+        # Get material model name and normalize it
+        material_model_raw = self.material_model.currentText()
+        
+        # Map to standard names
+        model_mapping = {
+            'Neo-Hookean': 'neo-hookean',
+            'Mooney-Rivlin': 'mooney-rivlin',
+            'Ogden': 'ogden'
+        }
+        material_model = model_mapping.get(material_model_raw, 'neo-hookean')
+        
+        # Get material parameters based on model type
+        if material_model == 'neo-hookean':
+            material_params = {
+                'mu': self.mu_spin.value() * 1e6,  # MPa to Pa
+                'epsilon_pre': self.prestrain.value(),
+                'bulk_modulus': self.bulk_modulus.value() * 1e6
+            }
+        elif material_model == 'mooney-rivlin':
+            material_params = {
+                'c1': self.c1_spin.value() * 1e6,
+                'c2': self.c2_spin.value() * 1e6,
+                'epsilon_pre': self.prestrain.value(),
+                'bulk_modulus': self.bulk_modulus.value() * 1e6
+            }
+        else:  # ogden
+            material_params = {
+                'mu': self.og_mu_spin.value() * 1e6,
+                'alpha': self.alpha_spin.value(),
+                'epsilon_pre': self.prestrain.value(),
+                'bulk_modulus': self.bulk_modulus.value() * 1e6
+            }
+        
+        # Build segment geometry
+        segments = []
+        for i, s in enumerate(self.segment_params):
+            segments.append({
+                'length': s['length'].value() * 1e-3,  # mm to m
+                'outer_radius': s['radius'].value() * 1e-3,
+                'wall_thickness': s['thickness'].value() * 1e-3
+            })
+        
+        # Build complete configuration
+        config = {
+            'num_segments': self.num_segments_spin.value(),
+            'material_model': material_model,
+            'material_params': material_params,
+            'geometry': {
+                'segments': segments,
+                'channel_radius': self.channel_radius.value() * 1e-3,
+                'septum_thickness': self.septum_thickness.value() * 1e-3
+            }
+        }
+        
+        return config
+    
+    def _record_training_sample(self, points, segments, solution_data):
+        """
+        Record a sample for PINO training after each simulation
+        
+        Call this from on_simulation_complete()
+        """
+        if not self.is_collecting_data or self.data_collector is None:
+            return
+        
+        if points is None or len(points) == 0:
+            return
+        
+        try:
+            # Get achieved position (end effector = last point)
+            achieved_position = points[-1].copy()
+            
+            # Get pressures from solution data
+            p = solution_data.get('pressures', {})
+            pressures = np.array([
+                p.get('A', 0),
+                p.get('B', 0),
+                p.get('C', 0),
+                p.get('D', 0)
+            ], dtype=np.float64)
+            
+            # For FK data, target = achieved (recording what we got)
+            target_position = achieved_position.copy()
+            
+            # Record sample
+            self.data_collector.record_sample(
+                target=target_position,
+                pressures=pressures,
+                achieved=achieved_position
+            )
+            
+            # Update UI with sample count
+            stats = self.data_collector.get_statistics()
+            self.samples_collected_label.setText(
+                f"Samples: {stats['total_samples']}"
+            )
+            
+            # Brief confirmation in output (only every 10 samples)
+            if stats['total_samples'] % 10 == 0:
+                self.output_text.append(
+                    f"  📊 Collected {stats['total_samples']} samples"
+                )
+            
+        except Exception as e:
+            print(f"Error recording sample: {e}")
+            import traceback
+            traceback.print_exc()
+
+class GPUSplineContext:
+    """Manages persistent GPU memory for real-time spline generation"""
+    
+    def __init__(self):
+        self.initialized = False
+        self.num_segments = None
+        self.resolution = None
+        self.total_points = None
+        
+        # Cached data
+        self.length = None
+        self.T_cumulative_flat = None
+        
+        # Store segment rigidities (EI values) for fast curvature computation
+        self.segment_EI = None
+    
+    def initialize(self, segments, resolution, epsilon_pre, etan_value):
+        """Initialize GPU context with geometry"""
+        print(f"\n[GPU] initialize() called with {len(segments)} segments, resolution={resolution}")
+        
+        if self.initialized:
+            print("[GPU] Already initialized, destroying old context first...")
+            self.destroy()
+        
+        self.num_segments = len(segments)
+        self.resolution = resolution
+        self.total_points = self.num_segments * resolution
+        
+        print(f"[GPU] Total points to generate: {self.total_points}")
+        
+        # Prepare static data
+        self.length = np.array([s.length for s in segments], dtype=np.float32)
+        print(f"[GPU] Segment lengths: {self.length}")
+        
+        # Compute segment rigidities (needed for curvature calculation)
+        self.segment_EI = np.zeros(self.num_segments, dtype=np.float64)
+        for i, seg in enumerate(segments):
+            seg.I = fk.compute_second_moment(seg.out_radius, seg.wall_thickness)
+            seg.EI = fk.flexural_rigidity(etan_value, seg.I)
+            self.segment_EI[i] = seg.EI
+        
+        print(f"[GPU] Computed EI values: {self.segment_EI}")
+        
+        # Compute initial transforms (with zero curvature)
+        print("[GPU] Computing initial transforms...")
+        kappa_init = np.zeros(self.num_segments, dtype=np.float32)
+        theta_init = np.zeros(self.num_segments, dtype=np.float32)
+        phi_init = np.zeros(self.num_segments, dtype=np.float32)
+        
+        T_cumulative = spline.compute_cumulative_transforms(
+            kappa_init, theta_init, phi_init, self.num_segments
+        )
+        self.T_cumulative_flat = np.ascontiguousarray(
+            T_cumulative.reshape(self.num_segments, 16), 
+            dtype=np.float32
+        )
+        
+        print(f"[GPU] T_cumulative shape: {self.T_cumulative_flat.shape}")
+        print(f"[GPU] Calling lib.initialize_gpu_context...")
+        
+        # NEW: Try to initialize GPU context with retry logic
+        max_retries = 3
+        error_code = -1
+        
+        for attempt in range(max_retries):
+            error_code = lib.initialize_gpu_context(
+                self.num_segments,
+                self.resolution,
+                self.length,
+                self.T_cumulative_flat
+            )
+            
+            print(f"[GPU] Attempt {attempt + 1}: lib.initialize_gpu_context returned: {error_code}")
+            
+            if error_code == 0:
+                break  # Success!
+            
+            # If error 999 (context issue), try to reset GPU
+            if error_code == 999:
+                print(f"[GPU] Error 999 detected (invalid context), resetting GPU...")
+                try:
+                    lib.reset_gpu_context()
+                    import time
+                    time.sleep(0.5)  # Give GPU time to reset
+                except Exception as e:
+                    print(f"[GPU] Reset failed: {e}")
+            
+            if attempt < max_retries - 1:
+                print(f"[GPU] Retrying in 1 second...")
+                import time
+                time.sleep(1)
+        
+        if error_code != 0:
+            raise RuntimeError(f"Failed to initialize GPU context: error {error_code}")
+        
+        self.initialized = True
+        print(f"✓ [GPU] Context initialized\n")
+
+    def update_fast(self, kappa, theta, phi):
+        """Fast update with new curvatures (GPU resident)"""
+        if not self.initialized:
+            raise RuntimeError("GPU context not initialized!")
+        
+        # Prepare arrays
+        kappa = np.ascontiguousarray(kappa, dtype=np.float32)
+        theta = np.ascontiguousarray(theta, dtype=np.float32)
+        phi = np.ascontiguousarray(phi, dtype=np.float32)
+        
+        # Allocate output
+        output = np.zeros(self.total_points * 3, dtype=np.float32)
+        
+        # Fast GPU update
+        error_code = lib.update_spline_fast(kappa, theta, phi, output)
+        
+        if error_code != 0:
+            raise RuntimeError(f"GPU update failed: {error_code}")
+        
+        return output.reshape(-1, 3)
+    
+    def update_transforms(self, kappa, theta, phi):
+        """Update transformation matrices when curvatures change significantly"""
+        if not self.initialized:
+            return
+        
+        T_cumulative = spline.compute_cumulative_transforms(
+            kappa, theta, phi, self.num_segments
+        )
+        self.T_cumulative_flat = np.ascontiguousarray(
+            T_cumulative.reshape(self.num_segments, 16), 
+            dtype=np.float32
+        )
+        
+        error_code = lib.update_transforms(self.T_cumulative_flat)
+        if error_code != 0:
+            print(f"Warning: Failed to update transforms: {error_code}")
+    
+    def destroy(self):
+        """Clean up GPU memory"""
+        if self.initialized:
+            lib.destroy_gpu_context()
+            self.initialized = False
+            print("✓ GPU context destroyed")
+    
+    def __del__(self):
+        """Destructor - last resort cleanup"""
+        if self.initialized:
+            print("WARNING: GPU context destroyed in __del__ (should call destroy() explicitly)")
+            self.destroy()
+
+class RobotGUI(QMainWindow, PINODataCollectionMixin):
 
     COLOR_PALETTES = {
         'Neon':         ['#C200FB', '#EC0868', '#FC2F00', '#EC7D10', '#FFBC0A', '#00FFFF', '#3772ff', '#3A0CA3', '#9EF01A', '#16DB65' ],
@@ -115,7 +614,34 @@ class RobotGUI(QMainWindow):
         self.points = None
         self.segments = None
         self.worker = None
+        self.data_collector = None
+        self.is_collecting_data = False
+        self.collection_config = None
         
+        if PINO_AVAILABLE:
+            data_dir = root / "data" / "raw"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            self.data_collector = PINODataCollector(
+                save_dir=str(data_dir),
+                buffer_size=10000,
+                auto_save_interval=500
+            )
+            print(f"✓ Data collector initialized. Save dir: {data_dir}")
+
+        # ============================================================================
+        # NEW: GPU context for real-time visualization
+        # ============================================================================
+        self.gpu_context = GPUSplineContext()
+        self.live_preview_active = False
+        self.update_timer = None  # For debouncing slider updates
+        
+        self.live_meshes = {
+            'centerline': None,
+            'boundaries': None,
+            'tubes': []
+        }
+
+        # self.plotter.enable_anti_aliasing('fxaa')  # Fast anti-aliasing
         self.init_ui()
         
     def init_ui(self):
@@ -170,6 +696,9 @@ class RobotGUI(QMainWindow):
         # Visualisation tab
         visualisation_tab = self.create_visualisation_controls()
         tabs.addTab(visualisation_tab, "Visualisation")
+
+        data_collection_tab = self.create_data_collection_controls()
+        tabs.addTab(data_collection_tab, "PINO Data")
 
         layout.addWidget(tabs, stretch=1)
         
@@ -298,7 +827,7 @@ class RobotGUI(QMainWindow):
             # Slider
             slider = QSlider(Qt.Horizontal)
             slider.setMinimum(0)
-            slider.setMaximum(1000)  # scale to allow decimals, e.g., 0-100 kPa with 0.01 steps
+            slider.setMaximum(1000)
             slider.setValue(60 if ch == 'A' else 0)
             slider.setTickPosition(QSlider.TicksBelow)
             slider.setTickInterval(100)
@@ -307,28 +836,79 @@ class RobotGUI(QMainWindow):
             # LineEdit for precise input
             line_edit = QLineEdit()
             line_edit.setFixedWidth(60)
-            line_edit.setText(f"{slider.value()/100:.2f}")  # convert slider value to float
+            line_edit.setText(f"{slider.value()/100:.2f}")
             layout.addWidget(line_edit, i, 2)
 
             # Bidirectional updates
             def slider_changed(v, le=line_edit):
-                le.setText(f"{v/100:.2f}")  # slider int -> float
+                le.setText(f"{v/100:.2f}")
 
             def lineedit_changed(text, s=slider):
                 try:
                     val = float(text)
-                    s.setValue(int(val*100))  # float -> slider int
+                    s.setValue(int(val*100))
                 except ValueError:
-                    pass  # ignore invalid input
+                    pass
 
             slider.valueChanged.connect(slider_changed)
             line_edit.editingFinished.connect(lambda le=line_edit: lineedit_changed(le.text()))
+            
+            # ============================================================================
+            # NEW: Connect to real-time update
+            # ============================================================================
+            slider.valueChanged.connect(self.on_pressure_changed_realtime)
 
             self.pressure_sliders[ch] = slider
         
-        layout.setRowStretch(4, 1)
+        # ============================================================================
+        # NEW: Add live preview checkbox
+        # ============================================================================
+        live_preview_layout = QHBoxLayout()
+        self.live_preview_checkbox = QCheckBox("🔴 Live Preview (GPU)")
+        self.live_preview_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-weight: bold;
+                color: #7132CA;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #00FF00;
+            }
+        """)
+        self.live_preview_checkbox.stateChanged.connect(self.toggle_live_preview)
+        live_preview_layout.addWidget(self.live_preview_checkbox)
+        
+        self.live_fps_label = QLabel("FPS: --")
+        self.live_fps_label.setStyleSheet("color: gray; font-size: 9pt;")
+        live_preview_layout.addWidget(self.live_fps_label)
+        live_preview_layout.addStretch()
+        
+        layout.addLayout(live_preview_layout, 4, 0, 1, 3)
+        
+        # NEW: GPU Reset Button
+        reset_gpu_layout = QHBoxLayout()
+        self.reset_gpu_button = QPushButton("🔄 Reset GPU")
+        self.reset_gpu_button.setToolTip("Reset GPU if you get errors after connecting/disconnecting displays")
+        self.reset_gpu_button.clicked.connect(self.manual_reset_gpu)
+        self.reset_gpu_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FF6B6B;
+                color: white;
+                padding: 5px;
+                font-size: 10px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #FF5252;
+            }
+        """)
+        reset_gpu_layout.addWidget(self.reset_gpu_button)
+        reset_gpu_layout.addStretch()
+        
+        layout.addLayout(reset_gpu_layout, 5, 0, 1, 3)
+        
+        layout.setRowStretch(6, 1)
         return widget
-    
+        
     def create_ik_controls(self):
         """Create inverse kinematics position controls"""
         widget = QWidget()
@@ -539,7 +1119,6 @@ class RobotGUI(QMainWindow):
         """Create material property controls with preset library"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        
         # Material preset selection
         preset_group = QGroupBox("Material Presets")
         preset_layout = QVBoxLayout(preset_group)
@@ -812,8 +1391,8 @@ class RobotGUI(QMainWindow):
         # Resolution control
         controls_grid.addWidget(QLabel("Spline Resolution:"), 0, 0)
         self.resolution_spin = QSpinBox()
-        self.resolution_spin.setRange(100, 2000)
-        self.resolution_spin.setValue(1000)
+        self.resolution_spin.setRange(50, 2000)
+        self.resolution_spin.setValue(50)
         self.resolution_spin.setSingleStep(100)
         self.resolution_spin.setToolTip("Number of points per segment for visualization")
         controls_grid.addWidget(self.resolution_spin, 0, 1)
@@ -1137,7 +1716,9 @@ class RobotGUI(QMainWindow):
         """Handle completed simulation"""
         self.points = points
         self.segments = segments
-        
+        # Record sample for PINO training (if collecting)
+        if self.is_collecting_data:
+            self._record_training_sample(points, segments, solution_data)
         # Display output text
         self.output_text.append(info_text)
         
@@ -1292,8 +1873,8 @@ class RobotGUI(QMainWindow):
             segment_points = self.points[start_idx:end_idx]
             
             # Create tube along segment path
-            spline = pv.Spline(segment_points, 100)
-            tube = spline.tube(radius=seg.out_radius, n_sides=20)
+            spline = pv.Spline(segment_points, 50)
+            tube = spline.tube(radius=seg.out_radius, n_sides=12)
             
             self.plotter.add_mesh(
                 tube,
@@ -1301,6 +1882,380 @@ class RobotGUI(QMainWindow):
                 opacity=opacity,
                 # label=f'Segment {i+1}'
             )
+    # ============================================================================
+    # REAL-TIME GPU VISUALIZATION METHODS
+    # ============================================================================
+    
+    def toggle_live_preview(self, state):
+        """Enable/disable live preview mode"""
+        print(f"\n[DEBUG] toggle_live_preview called with state: {state} (Qt.Checked={Qt.Checked})")  # ADD THIS
+        
+        if state == 2:  # Qt.Checked value
+            print("[DEBUG] Enabling live preview...")  # ADD THIS
+            # Enable live preview
+            self.enable_live_preview()
+        else:
+            print("[DEBUG] Disabling live preview...")  # ADD THIS
+            # Disable live preview
+            self.disable_live_preview()
+    
+    def enable_live_preview(self):
+        """Initialize GPU context and enable real-time updates"""
+        print("\n[DEBUG] enable_live_preview() called")
+        
+        try:
+            self.output_text.append("\n🔄 Initializing GPU context for live preview...")
+            
+            # Check GPU health first
+            print("[DEBUG] Checking GPU status...")
+            gpu_status = lib.check_gpu_status()
+            if gpu_status != 0:
+                raise RuntimeError(
+                    f"GPU is not available or not working properly (error {gpu_status})\n"
+                    "Please check:\n"
+                    "  • NVIDIA drivers are installed\n"
+                    "  • CUDA is properly configured\n"
+                    "  • GPU is not being used by another process"
+                )
+            
+            # Get current parameters
+            params = self.build_simulation_params()
+            
+            # Create segments
+            segments = []
+            for i, length in enumerate(params['segment_lengths']):
+                seg = fk.segment_params(
+                    length=length,
+                    out_radius=params['segment_radii'][i],
+                    wall_thickness=params['segment_thickness'][i]
+                )
+                segments.append(seg)
+            
+            # Store segments
+            self.segments = segments
+            
+            # Compute material properties
+            epsilon_pre = params['epsilon_pre']
+            
+            if params['material_model'] == "Neo-Hookean":
+                mu = params['mu']
+                model = fk.neohookean(mu=mu)
+                etan_value = fk.tangent_modulus.neohookean(mu=model.mu, e=epsilon_pre)
+            elif params['material_model'] == "Mooney-Rivlin":
+                c1 = params['c1']
+                c2 = params['c2']
+                model = fk.mooney_rivlin(c1=c1, c2=c2)
+                etan_value = fk.tangent_modulus.mooney_rivlin(c1=model.c1, c2=model.c2, e=epsilon_pre)
+            elif params['material_model'] == "Ogden":
+                mu = params['mu']
+                alpha = params['alpha']
+                model = fk.ogden(mu_input=mu, alpha=alpha)
+                etan_value = fk.tangent_modulus.ogden(mu=model.mu, alpha=model.alpha, e=epsilon_pre)
+            
+            # Initialize GPU context
+            resolution = self.resolution_spin.value()
+            self.gpu_context.initialize(segments, resolution, epsilon_pre, etan_value)
+            
+            # Store for use in updates
+            self.live_preview_params = params
+            
+            # Compute initial geometry with CURRENT pressures
+            initial_points = self.compute_current_geometry()
+            
+            # Initialize visualization meshes with ACTUAL geometry
+            self.initialize_live_meshes(initial_points)
+            
+            self.live_preview_active = True
+            
+            self.output_text.append("✓ Live preview enabled!")
+            self.live_preview_checkbox.setText("🟢 Live Preview (GPU)")
+            
+        except RuntimeError as e:
+            error_msg = str(e)
+            self.output_text.append(f"✗ {error_msg}")
+            self.live_preview_checkbox.setChecked(False)
+            
+        except Exception as e:
+            self.output_text.append(f"✗ Failed to enable live preview: {str(e)}")
+            self.live_preview_checkbox.setChecked(False)
+            import traceback
+            traceback.print_exc()
+
+    def compute_current_geometry(self):
+        """Compute geometry with current pressure values"""
+        # Get current pressures
+        P_A = self.pressure_sliders['A'].value() * 1e3
+        P_B = self.pressure_sliders['B'].value() * 1e3
+        P_C = self.pressure_sliders['C'].value() * 1e3
+        P_D = self.pressure_sliders['D'].value() * 1e3
+        
+        params = self.live_preview_params
+        
+        # Compute moments
+        channel_area = fk.channel_area(params['channel_radius'])
+        centroid_dist = fk.centroid_distance(params['channel_radius'], params['septum_thickness'])
+        
+        M_ac = fk.directional_moment(P_A, P_C, channel_area, centroid_dist)
+        M_bd = fk.directional_moment(P_B, P_D, channel_area, centroid_dist)
+        M_res = fk.resultant_moment(M_ac, M_bd)
+        phi = fk.bending_plane_ang(M_ac, M_bd)
+        
+        # Compute curvatures
+        kappa = np.zeros(len(self.segments), dtype=np.float32)
+        theta = np.zeros(len(self.segments), dtype=np.float32)
+        phi_array = np.full(len(self.segments), phi, dtype=np.float32)
+        
+        epsilon_pre = params['epsilon_pre']
+        
+        for i, seg in enumerate(self.segments):
+            EI = self.gpu_context.segment_EI[i]
+            kappa[i] = fk.curvature(M_res, EI)
+            theta[i] = fk.arc_angle(kappa[i], fk.prestrained_length(seg.length, epsilon_pre))
+        
+        # Update transforms
+        self.gpu_context.update_transforms(kappa, theta, phi_array)
+        
+        # GPU update to get points
+        points = self.gpu_context.update_fast(kappa, theta, phi_array)
+        
+        return points
+    
+    def manual_reset_gpu(self):
+        """Manually reset GPU context (useful after display changes)"""
+        try:
+            self.output_text.append("\n🔄 Manually resetting GPU...")
+            
+            # Disable live preview if active
+            was_active = self.live_preview_active
+            if was_active:
+                self.disable_live_preview()
+            
+            # Reset GPU
+            lib.reset_gpu_context()
+            
+            import time
+            time.sleep(0.5)
+            
+            self.output_text.append("✓ GPU reset complete!")
+            
+            # Optionally re-enable live preview
+            if was_active:
+                self.output_text.append("Please re-enable Live Preview manually.")
+                
+        except Exception as e:
+            self.output_text.append(f"✗ GPU reset failed: {str(e)}")
+                    
+    def disable_live_preview(self):
+        """Disable live preview and clean up GPU"""
+        if self.live_preview_active:
+            self.gpu_context.destroy()
+            self.live_preview_active = False
+            
+            # Clear live mesh references
+            self.live_meshes = {
+                'centerline': None,
+                'boundaries': None,
+                'tubes': []
+            }
+            
+            self.output_text.append("✓ Live preview disabled")
+            self.live_preview_checkbox.setText("🔴 Live Preview (GPU)")
+    
+    def initialize_live_meshes(self, points=None):
+        """Create PyVista meshes once for live preview (called only at start)"""
+        # Clear plotter
+        self.plotter.clear()
+        self.plotter.set_background('white')
+        
+        # Add grid (static)
+        if self.show_grid.isChecked():
+            extent = 1.0
+            spacing = 0.05
+            coords = np.arange(-extent, extent + spacing, spacing)
+            grid_xy = pv.RectilinearGrid(coords, coords, [0.0])
+            self.plotter.add_mesh(grid_xy, color="black", style="wireframe", opacity=1.0)
+        
+        # If points are provided, use them; otherwise create dummy points
+        if points is None:
+            # Create initial straight line as dummy points
+            resolution = self.resolution_spin.value()
+            total_length = sum(seg.length for seg in self.segments)
+            dummy_z = np.linspace(0, total_length, len(self.segments) * resolution)
+            points = np.column_stack([
+                np.zeros_like(dummy_z),
+                np.zeros_like(dummy_z),
+                dummy_z
+            ])
+        
+        # Create centerline mesh
+        centerline = pv.Spline(points, len(points))
+        self.live_meshes['centerline'] = self.plotter.add_mesh(
+            centerline,
+            color='blue',
+            line_width=3
+        )
+        
+        # Create boundary points mesh
+        if self.show_boundaries.isChecked():
+            resolution = self.resolution_spin.value()
+            segment_boundaries = np.arange(0, len(points), resolution)
+            boundary_points = points[segment_boundaries]
+            point_cloud = pv.PolyData(boundary_points)
+            self.live_meshes['boundaries'] = self.plotter.add_mesh(
+                point_cloud,
+                color='red',
+                point_size=15,
+                render_points_as_spheres=True
+            )
+        
+        # Create tube meshes for each segment
+        palette_name = self.color_palette.currentText()
+        colors = self.COLOR_PALETTES[palette_name]
+        opacity = self.tube_opacity.value()
+        
+        self.live_meshes['tubes'].clear()
+        
+        # Create one tube per segment
+        resolution = self.resolution_spin.value()
+        points_per_segment = resolution
+        for i, seg in enumerate(self.segments):
+            start_idx = i * points_per_segment
+            end_idx = (i + 1) * points_per_segment
+            segment_points = points[start_idx:end_idx]
+            
+            # Skip if not enough points for a spline
+            if len(segment_points) < 2:
+                continue
+                
+            spline = pv.Spline(segment_points, 50)
+            tube = spline.tube(radius=seg.out_radius, n_sides=12)
+            tube_actor = self.plotter.add_mesh(
+                tube,
+                color=colors[i % len(colors)],
+                opacity=opacity
+            )
+            self.live_meshes['tubes'].append(tube_actor)
+        
+        # Add coordinate frame (static)
+        scale = 0.02
+        position = np.array([0, 0, 0])
+        
+        arrow_x = pv.Arrow(start=position, direction=[1, 0, 0], scale=scale)
+        self.plotter.add_mesh(arrow_x, color='red')
+        
+        arrow_y = pv.Arrow(start=position, direction=[0, 1, 0], scale=scale)
+        self.plotter.add_mesh(arrow_y, color='green')
+        
+        arrow_z = pv.Arrow(start=position, direction=[0, 0, 1], scale=scale)
+        self.plotter.add_mesh(arrow_z, color='blue')
+        
+        self.plotter.reset_camera()
+        self.plotter.enable_parallel_projection()
+        self.plotter.camera.parallel_scale = 0.2
+
+
+    def on_pressure_changed_realtime(self, value):
+        """Called every time a pressure slider moves"""
+        if not self.live_preview_active:
+            return
+        
+        # Debounce: use QTimer to avoid updating too frequently
+        if self.update_timer is not None:
+            self.update_timer.stop()
+        
+        from PySide6.QtCore import QTimer
+        self.update_timer = QTimer()
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self.update_visualization_fast)
+        self.update_timer.start(4)  # ~250 FPS max
+    
+    def update_visualization_fast(self):
+        """Ultra-fast visualization update using GPU context (updates points only)"""
+        if not self.live_preview_active:
+            return
+        
+        try:
+            import time
+            start = time.time()
+            
+            # Get current pressures
+            P_A = self.pressure_sliders['A'].value() * 1e3
+            P_B = self.pressure_sliders['B'].value() * 1e3
+            P_C = self.pressure_sliders['C'].value() * 1e3
+            P_D = self.pressure_sliders['D'].value() * 1e3
+            
+            params = self.live_preview_params
+            
+            # Compute moments
+            channel_area = fk.channel_area(params['channel_radius'])
+            centroid_dist = fk.centroid_distance(params['channel_radius'], params['septum_thickness'])
+            
+            M_ac = fk.directional_moment(P_A, P_C, channel_area, centroid_dist)
+            M_bd = fk.directional_moment(P_B, P_D, channel_area, centroid_dist)
+            M_res = fk.resultant_moment(M_ac, M_bd)
+            phi = fk.bending_plane_ang(M_ac, M_bd)
+            
+            # Compute curvatures
+            kappa = np.zeros(len(self.segments), dtype=np.float32)
+            theta = np.zeros(len(self.segments), dtype=np.float32)
+            phi_array = np.full(len(self.segments), phi, dtype=np.float32)
+            
+            epsilon_pre = params['epsilon_pre']
+            
+            for i, seg in enumerate(self.segments):
+                EI = self.gpu_context.segment_EI[i]
+                kappa[i] = fk.curvature(M_res, EI)
+                theta[i] = fk.arc_angle(kappa[i], fk.prestrained_length(seg.length, epsilon_pre))
+            
+            # Update transforms
+            self.gpu_context.update_transforms(kappa, theta, phi_array)
+            
+            # GPU update (FAST!)
+            points = self.gpu_context.update_fast(kappa, theta, phi_array)
+            self.points = points
+            
+            # NEW: Update meshes by replacing them (PyVista approach)
+            resolution = self.resolution_spin.value()
+            segment_boundaries = np.arange(0, len(points), resolution)
+            
+            # Update centerline
+            centerline = pv.Spline(points, resolution)
+            self.live_meshes['centerline'].mapper.SetInputData(centerline)
+            
+            # Update boundaries
+            if self.live_meshes['boundaries'] is not None:
+                boundary_points = points[segment_boundaries]
+                point_cloud = pv.PolyData(boundary_points)
+                self.live_meshes['boundaries'].mapper.SetInputData(point_cloud)
+            
+            # Update tubes
+            for i, tube_actor in enumerate(self.live_meshes['tubes']):
+                start_idx = segment_boundaries[i]
+                end_idx = segment_boundaries[i+1] if i < len(self.segments)-1 else len(points)
+                segment_points = points[start_idx:end_idx]
+                
+                spline = pv.Spline(segment_points, 50)
+                tube = spline.tube(radius=self.segments[i].out_radius, n_sides=12)
+                tube_actor.mapper.SetInputData(tube)
+            
+            # Force render update
+            self.plotter.render()
+            
+            # Show FPS
+            elapsed = (time.time() - start) * 1000
+            fps = 1000.0 / elapsed if elapsed > 0 else 0
+            self.live_fps_label.setText(f"FPS: {fps:.1f} ({elapsed:.1f}ms)")
+            
+        except Exception as e:
+            print(f"Live preview error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        def closeEvent(self, event):
+            """Clean up GPU resources on exit"""
+            if self.gpu_context.initialized:
+                self.gpu_context.destroy()
+            event.accept()
 
 
 def compute_simulation_fk(params):

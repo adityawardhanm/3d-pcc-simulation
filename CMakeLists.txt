@@ -14,26 +14,7 @@ set(CMAKE_CUDA_ARCHITECTURES 89) # Targeting NVIDIA Hopper architecture (compute
 
 set(KINEMATICS_DIR ${CMAKE_SOURCE_DIR}/src/cuda)
 
-# ===== forward_kinematics.so =====
-add_library(forward_kinematics SHARED ${KINEMATICS_DIR}/forward_kinematics.cu)
-set_target_properties(forward_kinematics 
-    PROPERTIES PREFIX "" 
-    POSITION_INDEPENDENT_CODE ON)
-
-target_compile_options(forward_kinematics PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:
-    -O3  
-    -gencode=arch=compute_89,code=sm_89
-    -gencode=arch=compute_89,code=compute_89    
-        
-    --maxrregcount=0
-    -Xptxas -v
-    -Xptxas -O3
-    -lineinfo
-    >
-)
-
-# ===== inverse_kinematics.so =====
+# ===== fk.so =====
 add_library(fk SHARED ${KINEMATICS_DIR}/fk.cu
 )
 set_target_properties(fk 

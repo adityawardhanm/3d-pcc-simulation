@@ -6,18 +6,43 @@ root = Path(__file__).resolve().parents[2]  # parent_directory
 
 
 # LOAD CUDA SHARED LIBRARY
-lib = ctypes.CDLL(str(root / "lib/forward_kinematics.so"))
+lib = ctypes.CDLL(str(root / "lib/fk.so"))
 lib.generate_spline_points.argtypes = [
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # kappa
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # theta
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # phi
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # length
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),  # T_cumulative
-    ctypes.c_int,                                     # resolution
-    ctypes.c_int,                                     # num_segments
-    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")   # output
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),
+    ctypes.c_int,
+    ctypes.c_int,
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")
 ]
 lib.generate_spline_points.restype = ctypes.c_int
+
+lib.initialize_gpu_context.argtypes = [
+    ctypes.c_int,                                      # num_segments
+    ctypes.c_int,                                      # resolution
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # length
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")    # T_cumulative
+]
+lib.initialize_gpu_context.restype = ctypes.c_int
+
+lib.update_spline_fast.argtypes = [
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # kappa
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # theta
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"),   # phi
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")    # output
+]
+lib.update_spline_fast.restype = ctypes.c_int
+
+lib.update_transforms.argtypes = [
+    ndpointer(ctypes.c_float, flags="C_CONTIGUOUS")    # T_cumulative
+]
+lib.update_transforms.restype = ctypes.c_int
+
+lib.destroy_gpu_context.argtypes = []
+lib.destroy_gpu_context.restype = ctypes.c_int
+
 
 # FUNCTION TO COMPUTE TRANSFORMATION MATRIX FOR A SEGMENT - TBD (CHECK FORMULA AND STRAIGHT SEGMENT CASE)
 def compute_transformation_matrix(kappa, theta, phi):

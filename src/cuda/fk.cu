@@ -141,6 +141,71 @@ __global__ void generate_spline_kernel(
 extern "C" {
 #endif
 
+int destroy_gpu_context();
+int reset_gpu_context();
+
+int destroy_gpu_context() {
+    if (!g_ctx.initialized) {
+        return 0;  // Nothing to destroy
+    }
+    
+    cudaFree(g_ctx.d_length);
+    cudaFree(g_ctx.d_T_cumulative);
+    cudaFree(g_ctx.d_kappa);
+    cudaFree(g_ctx.d_theta);
+    cudaFree(g_ctx.d_phi);
+    cudaFree(g_ctx.d_output);
+    
+    g_ctx.initialized = false;
+    
+    printf("[GPU] Context destroyed\n");
+    
+    return 0;
+}
+int reset_gpu_context() {
+    printf("[GPU] Resetting CUDA device...\n");
+    
+    // Clear any pending errors first
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("[GPU] Clearing pending error: %s\n", cudaGetErrorString(err));
+    }
+    
+    // Destroy existing context if initialized
+    if (g_ctx.initialized) {
+        printf("[GPU] Destroying existing context...\n");
+        
+        // Try to free memory, ignore errors
+        cudaFree(g_ctx.d_length);
+        cudaFree(g_ctx.d_T_cumulative);
+        cudaFree(g_ctx.d_kappa);
+        cudaFree(g_ctx.d_theta);
+        cudaFree(g_ctx.d_phi);
+        cudaFree(g_ctx.d_output);
+        
+        // Clear any errors from failed frees
+        cudaGetLastError();
+        
+        g_ctx.initialized = false;
+    }
+    
+    // Reset the CUDA device
+    err = cudaDeviceReset();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaDeviceReset failed: %s (code %d)\n", 
+                cudaGetErrorString(err), err);
+        
+        // Even if reset fails, clear the error state
+        cudaGetLastError();
+        
+        return err;
+    }
+    
+    printf("[GPU] CUDA device reset complete\n");
+    return 0;
+}
+
+
 int generate_spline_points(
     const float* h_kappa,           // Host: curvature array [5]
     const float* h_theta,           // Host: arc angle array [5]
@@ -209,22 +274,84 @@ int initialize_gpu_context(
     const float* h_length,
     const float* h_T_cumulative
 ) {
+    // NEW: Try to recover from bad state first
+    cudaError_t err = cudaGetLastError(); // Clear any pending errors
+    if (err != cudaSuccess) {
+        printf("[GPU] WARNING: Clearing pending CUDA error: %s\n", cudaGetErrorString(err));
+    }
+    
     if (g_ctx.initialized) {
-        printf("[GPU] Context already initialized, skipping\n");
-        return 0;  // Already initialized
+        printf("[GPU] Context already initialized, destroying first...\n");
+        destroy_gpu_context();
     }
     
     g_ctx.num_segments = num_segments;
     g_ctx.resolution = resolution;
     g_ctx.total_points = num_segments * resolution;
     
-    // Allocate persistent buffers
-    CUDA_CHECK(cudaMalloc(&g_ctx.d_length, num_segments * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&g_ctx.d_T_cumulative, num_segments * 16 * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&g_ctx.d_kappa, num_segments * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&g_ctx.d_theta, num_segments * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&g_ctx.d_phi, num_segments * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&g_ctx.d_output, g_ctx.total_points * 3 * sizeof(float)));
+    // Try to allocate memory with detailed error reporting
+    err = cudaMalloc(&g_ctx.d_length, num_segments * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaMalloc(d_length) failed: %s (code %d)\n", 
+                cudaGetErrorString(err), err);
+        
+        // Try to recover by resetting device
+        printf("[GPU] Attempting device reset...\n");
+        cudaDeviceReset();
+        
+        // Retry allocation
+        err = cudaMalloc(&g_ctx.d_length, num_segments * sizeof(float));
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[GPU] Retry failed: %s\n", cudaGetErrorString(err));
+            return err;
+        }
+        printf("[GPU] Recovery successful!\n");
+    }
+    
+    err = cudaMalloc(&g_ctx.d_T_cumulative, num_segments * 16 * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaMalloc(d_T_cumulative) failed: %s\n", cudaGetErrorString(err));
+        cudaFree(g_ctx.d_length);
+        return err;
+    }
+    
+    err = cudaMalloc(&g_ctx.d_kappa, num_segments * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaMalloc(d_kappa) failed: %s\n", cudaGetErrorString(err));
+        cudaFree(g_ctx.d_length);
+        cudaFree(g_ctx.d_T_cumulative);
+        return err;
+    }
+    
+    err = cudaMalloc(&g_ctx.d_theta, num_segments * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaMalloc(d_theta) failed: %s\n", cudaGetErrorString(err));
+        cudaFree(g_ctx.d_length);
+        cudaFree(g_ctx.d_T_cumulative);
+        cudaFree(g_ctx.d_kappa);
+        return err;
+    }
+    
+    err = cudaMalloc(&g_ctx.d_phi, num_segments * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaMalloc(d_phi) failed: %s\n", cudaGetErrorString(err));
+        cudaFree(g_ctx.d_length);
+        cudaFree(g_ctx.d_T_cumulative);
+        cudaFree(g_ctx.d_kappa);
+        cudaFree(g_ctx.d_theta);
+        return err;
+    }
+    
+    err = cudaMalloc(&g_ctx.d_output, g_ctx.total_points * 3 * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaMalloc(d_output) failed: %s\n", cudaGetErrorString(err));
+        cudaFree(g_ctx.d_length);
+        cudaFree(g_ctx.d_T_cumulative);
+        cudaFree(g_ctx.d_kappa);
+        cudaFree(g_ctx.d_theta);
+        cudaFree(g_ctx.d_phi);
+        return err;
+    }
     
     // Upload static data
     CUDA_CHECK(cudaMemcpy(g_ctx.d_length, h_length, 
@@ -234,7 +361,7 @@ int initialize_gpu_context(
     
     g_ctx.initialized = true;
     
-    printf("[GPU] Context initialized: %d segments × %d points = %d total points\n", 
+    printf("[GPU] Context initialized successfully: %d segments × %d points = %d total points\n", 
            num_segments, resolution, g_ctx.total_points);
     
     return 0;
@@ -287,7 +414,36 @@ int update_spline_fast(
     
     return 0;
 }
-
+int check_gpu_status() {
+    cudaError_t err = cudaGetLastError(); // Clear errors
+    
+    int deviceCount = 0;
+    err = cudaGetDeviceCount(&deviceCount);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaGetDeviceCount failed: %s\n", cudaGetErrorString(err));
+        return err;
+    }
+    
+    if (deviceCount == 0) {
+        fprintf(stderr, "[GPU] No CUDA devices found!\n");
+        return -1;
+    }
+    
+    printf("[GPU] Found %d CUDA device(s)\n", deviceCount);
+    
+    // Try to get device properties
+    cudaDeviceProp prop;
+    err = cudaGetDeviceProperties(&prop, 0);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GPU] cudaGetDeviceProperties failed: %s\n", cudaGetErrorString(err));
+        return err;
+    }
+    
+    printf("[GPU] Device 0: %s\n", prop.name);
+    printf("[GPU] Compute capability: %d.%d\n", prop.major, prop.minor);
+    
+    return 0;
+}
 /**
  * Update transformation matrices (when geometry changes)
  */
@@ -299,29 +455,6 @@ int update_transforms(const float* h_T_cumulative) {
     
     CUDA_CHECK(cudaMemcpy(g_ctx.d_T_cumulative, h_T_cumulative, 
                           g_ctx.num_segments * 16 * sizeof(float), cudaMemcpyHostToDevice));
-    
-    return 0;
-}
-
-/**
- * Clean up GPU memory
- * Call this when closing application or disabling live preview
- */
-int destroy_gpu_context() {
-    if (!g_ctx.initialized) {
-        return 0;  // Nothing to destroy
-    }
-    
-    cudaFree(g_ctx.d_length);
-    cudaFree(g_ctx.d_T_cumulative);
-    cudaFree(g_ctx.d_kappa);
-    cudaFree(g_ctx.d_theta);
-    cudaFree(g_ctx.d_phi);
-    cudaFree(g_ctx.d_output);
-    
-    g_ctx.initialized = false;
-    
-    printf("[GPU] Context destroyed\n");
     
     return 0;
 }
