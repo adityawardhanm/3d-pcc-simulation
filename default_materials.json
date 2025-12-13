@@ -1,0 +1,14 @@
+{
+  "Ecoflex 00-50": {
+    "epsilon_pre": 0.15,
+    "bulk_modulus": 50000000.0
+  },
+  "Dragon Skin 30": {
+    "epsilon_pre": 0.15,
+    "bulk_modulus": 100000000.0
+  },
+  "Sylgard 184": {
+    "epsilon_pre": 0.15,
+    "bulk_modulus": 200000000.0
+  }
+}
