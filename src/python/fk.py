@@ -94,11 +94,11 @@ def channel_area(channel_radius):
     channel_area = (math.pi*channel_radius**2)/4 # four semi-circular channels
     return channel_area
 
-def centroid_distance(channel_radius,septum_thickness):
-    term1 = channel_radius + septum_thickness/2
-    term2 = 4*channel_radius/3*math.pi
-    centroid_distance = term1 + term2
-    return centroid_distance
+def centroid_distance(channel_radius, septum_thickness):
+    return (
+        channel_radius + septum_thickness / 2
+        + (4 * channel_radius) / (3 * math.pi)
+    )
 
 def directional_moment(channel_1_pressure, channel_2_pressure, channel_area, centroid_distance):
     delta_p = channel_1_pressure - channel_2_pressure
@@ -111,10 +111,8 @@ def resultant_moment(M_ac, M_bd):
 
 def bending_plane_ang(M_ac, M_bd):
     if M_ac == 0 and M_bd == 0:
-        phi = 0.0
-    else:
-        phi = math.atan2(M_bd, M_ac)
-    return phi # in degrees
+        return 0.0
+    return math.atan2(M_bd, M_ac)
 
 def curvature(M_res, EI):
     curvature = M_res / EI
@@ -125,5 +123,4 @@ def prestrained_length(original_length, epsilon_pre):
     return length_pre
 
 def arc_angle(curvature,length_pre):
-    theta = curvature * length_pre
-    return theta # in degrees
+    return curvature * length_pre

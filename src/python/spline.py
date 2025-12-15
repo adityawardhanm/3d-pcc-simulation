@@ -52,21 +52,20 @@ def compute_transformation_matrix(kappa, theta, phi):
     cos_theta = np.cos(theta)
     sin_theta = np.sin(theta)
     
-    # Straight segment case - TBD
     if abs(kappa) < 1e-6:
         T = np.eye(4, dtype=np.float32)
-        T[2, 3] = theta  
+        T[2, 3] = theta / max(kappa, 1e-6)
         return T
     
     T = np.zeros((4, 4), dtype=np.float32)          # Matrix initialization
     
     # Rotation part (top-left 3x3)
-    T[0, 0] = cos_phi * cos_theta + sin_phi * sin_phi
+    T[0, 0] = cos_phi**2 + sin_phi**2 * cos_theta
     T[0, 1] = -sin_phi * cos_phi * (1 - cos_theta)
     T[0, 2] = cos_phi * sin_theta
     
     T[1, 0] = -sin_phi * cos_phi * (1 - cos_theta)
-    T[1, 1] = sin_phi * sin_phi + cos_phi * cos_phi * cos_theta
+    T[1, 1] = sin_phi**2 + cos_phi**2 * cos_theta
     T[1, 2] = sin_phi * sin_theta
     
     T[2, 0] = -cos_phi * sin_theta

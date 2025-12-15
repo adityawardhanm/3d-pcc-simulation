@@ -2,7 +2,7 @@
 
 # IMPORTS
 import sys
-import widgets_new as widgets
+import widgets
 # import widgets
 from PySide6.QtWidgets import (QApplication)
 

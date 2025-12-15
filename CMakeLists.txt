@@ -10,7 +10,7 @@ project(CudaKinematics LANGUAGES CUDA CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
-set(CMAKE_CUDA_ARCHITECTURES 89) # Targeting NVIDIA Hopper architecture (compute capability 8.9)
+set(CMAKE_CUDA_ARCHITECTURES 89) # Targeting NVIDIA Ada Lovelace architecture (compute capability 8.9)
 
 set(KINEMATICS_DIR ${CMAKE_SOURCE_DIR}/src/cuda)
 

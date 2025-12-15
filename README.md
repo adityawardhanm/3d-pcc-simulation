@@ -1,1 +1,1 @@
-# 2d-pcc-simulation
+# 3d-pcc-simulation
