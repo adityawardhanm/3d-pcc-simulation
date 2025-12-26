@@ -26,7 +26,6 @@ root = Path(__file__).resolve().parents[1]  # parent_directory
 src_path = root / "src" / "python"
 sys.path.append(str(src_path))
 import fk # pyright: ignore[reportMissingImports]
-import fkp # pyright: ignore[reportMissingImports]
 import spline # pyright: ignore[reportMissingImports]
 from materials_library import MaterialLibrary # pyright: ignore[reportMissingImports]
 import checks # pyright: ignore[reportMissingImports]

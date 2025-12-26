@@ -8,14 +8,14 @@ set(CMAKE_CUDA_COMPILER /usr/local/cuda-12.6/bin/nvcc)
 project(CudaKinematics LANGUAGES CUDA CXX)
 
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
 set(CMAKE_CUDA_ARCHITECTURES 89) # Targeting NVIDIA Ada Lovelace architecture (compute capability 8.9)
 
-set(KINEMATICS_DIR ${CMAKE_SOURCE_DIR}/src/cuda)
+set(CUDA_DIR ${CMAKE_SOURCE_DIR}/src/cuda)
 
 # ===== fk.so =====
-add_library(fk SHARED ${KINEMATICS_DIR}/fk.cu
+add_library(fk SHARED ${CUDA_DIR}/fk.cu
 )
 set_target_properties(fk 
     PROPERTIES PREFIX ""        # No 'lib' prefix
